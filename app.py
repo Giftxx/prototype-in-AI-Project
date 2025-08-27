@@ -1,303 +1,348 @@
-# app.py
-import io, urllib.request, os
+# app.py (Refactored and Formatted)
+
+import io
+import urllib.request
 import numpy as np
 import cv2
 from PIL import Image
 import streamlit as st
 from streamlit_option_menu import option_menu
 from streamlit_img_label import st_img_label
+import matplotlib.pyplot as plt
 
-# ===================== Helpers =====================
-def load_image_from_bytes(b):
-    return Image.open(io.BytesIO(b)).convert("RGB")
+# ===================== Helper Functions =====================
+def load_image_from_bytes(data: bytes) -> Image.Image:
+    """Load image from given bytes and convert to RGB PIL Image."""
+    return Image.open(io.BytesIO(data)).convert("RGB")
 
-def pil_to_cv(img_pil):
+def pil_to_cv(img_pil: Image.Image) -> np.ndarray:
+    """Convert a PIL Image to OpenCV BGR format."""
     return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
-def cv_to_pil(img_cv):
+def cv_to_pil(img_cv: np.ndarray) -> Image.Image:
+    """Convert an OpenCV BGR image to a PIL Image."""
     return Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
 
-def ensure_odd(n):
+def ensure_odd(n: int) -> int:
+    """Ensure the given number n is odd (used for kernel sizes)."""
     n = int(n)
     return n if n % 2 == 1 else n + 1
 
-def blend_with_original(orig_bgr, fx_bgr, strength_pct):
-    a = float(strength_pct) / 100.0
-    return cv2.addWeighted(fx_bgr, a, orig_bgr, 1.0 - a, 0.0)
+def clamp(v: int, lo: int, hi: int) -> int:
+    """Clamp value v to the range [lo, hi]."""
+    return max(lo, min(hi, v))
 
-def bbox_to_xyxy(b):
+def blend_with_original(orig_bgr: np.ndarray, fx_bgr: np.ndarray, strength_pct: float) -> np.ndarray:
+    """Blend the effect image (fx_bgr) with the original image (orig_bgr) using the given strength percentage."""
+    alpha = float(strength_pct) / 100.0
+    return cv2.addWeighted(fx_bgr, alpha, orig_bgr, 1.0 - alpha, 0.0)
+
+def make_display_image(bgr: np.ndarray, target_h: int = 430, max_w: int = 1000):
+    """Resize image for display (maintaining aspect ratio) so it fits within target_h and max_w.
+    Returns the resized PIL image, the scale factor, display size (w,h), and original size (W,H)."""
+    H, W = bgr.shape[:2]
+    # Do not upscale beyond original size
+    scale = min(target_h / float(H), max_w / float(W), 1.0)
+    disp_w, disp_h = int(W * scale), int(H * scale)
+    disp_bgr = cv2.resize(bgr, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
+    return cv_to_pil(disp_bgr), scale, (disp_w, disp_h), (W, H)
+
+# --------- ROI / Bounding Box Utilities ---------
+def rect_to_xyxy(rect, fallback_w=None, fallback_h=None):
     """
-    รับได้ทั้งรูปแบบ:
-    - dict: {"x":..., "y":..., "w":..., "h":...}
-    - dict: {"left":..., "top":..., "width":..., "height":...}
-    - dict: {"x1":..., "y1":..., "x2":..., "y2":...} / {"xmin","ymin","xmax","ymax"}
-    - list/tuple: [x, y, w, h] หรือ [x1, y1, x2, y2]
-    คืนค่าเป็น (x1, y1, x2, y2) แบบ int
+    Convert various ROI rectangle formats to (x1, y1, x2, y2) coordinates.
+    Accepts:
+    - dict: keys could be x,y,w,h or left,top,width,height or x1,y1,x2,y2 (xmin,...).
+    - list/tuple of 4 numbers: interpreted as [x,y,w,h] if w,h seem like dimensions, otherwise [x1,y1,x2,y2].
     """
-    # list/tuple
-    if isinstance(b, (list, tuple)) and len(b) >= 4:
-        x1, y1, a, b2 = b[:4]
-        # เดาว่าเป็น [x, y, w, h] ถ้าค่า a<b2 ส่วนใหญ่คือ w,h
-        # ปลอดภัยกว่าคือถือเป็น [x,y,w,h] เสมอ:
-        x2 = x1 + a
-        y2 = y1 + b2
-        return int(x1), int(y1), int(x2), int(y2)
-
-    # dict
-    if isinstance(b, dict):
-        # แบบมี x,y,w,h
-        if all(k in b for k in ("x", "y")) and ("w" in b or "width" in b):
-            x = b.get("x", b.get("left"))
-            y = b.get("y", b.get("top"))
-            w = b.get("w", b.get("width"))
-            h = b.get("h", b.get("height"))
-            return int(x), int(y), int(x + w), int(y + h)
-
-        # แบบมี left,top,width,height
-        if all(k in b for k in ("left", "top", "width", "height")):
-            x = b["left"]; y = b["top"]; w = b["width"]; h = b["height"]
-            return int(x), int(y), int(x + w), int(y + h)
-
-        # แบบมี x1,y1,x2,y2 หรือ xmin,ymin,xmax,ymax
-        x1 = b.get("x1", b.get("xmin"))
-        y1 = b.get("y1", b.get("ymin"))
-        x2 = b.get("x2", b.get("xmax"))
-        y2 = b.get("y2", b.get("ymax"))
+    # Dictionary formats
+    if isinstance(rect, dict):
+        # If keys for top-left and width/height
+        if all(k in rect for k in ("x", "y")) and ("w" in rect or "width" in rect):
+            x = float(rect.get("x", rect.get("left", 0)))
+            y = float(rect.get("y", rect.get("top", 0)))
+            w = float(rect.get("w", rect.get("width", 0)))
+            h = float(rect.get("h", rect.get("height", 0)))
+            return int(round(x)), int(round(y)), int(round(x + w)), int(round(y + h))
+        if all(k in rect for k in ("left", "top", "width", "height")):
+            x = float(rect["left"]); y = float(rect["top"])
+            w = float(rect["width"]); h = float(rect["height"])
+            return int(round(x)), int(round(y)), int(round(x + w)), int(round(y + h))
+        # If keys for explicit coordinates
+        x1 = rect.get("x1", rect.get("xmin"))
+        y1 = rect.get("y1", rect.get("ymin"))
+        x2 = rect.get("x2", rect.get("xmax"))
+        y2 = rect.get("y2", rect.get("ymax"))
         if None not in (x1, y1, x2, y2):
-            return int(x1), int(y1), int(x2), int(y2)
+            return int(round(float(x1))), int(round(float(y1))), int(round(float(x2))), int(round(float(y2)))
+    # List/Tuple format
+    if isinstance(rect, (list, tuple)) and len(rect) >= 4:
+        a, b, c, d = [float(x) for x in rect[:4]]
+        # If c,d likely represent width,height (positive and relatively small compared to fallback sizes)
+        if fallback_w and fallback_h and 0 < c <= fallback_w and 0 < d <= fallback_h:
+            return int(round(a)), int(round(b)), int(round(a + c)), int(round(b + d))
+        # Otherwise treat as [x1,y1,x2,y2]
+        return int(round(a)), int(round(b)), int(round(c)), int(round(d))
+    # If format is unsupported
+    raise KeyError("Unsupported rect format for ROI coordinates.")
 
-    raise ValueError(f"Unknown bbox format: {type(b)} -> {b}")
+def rect_to_xyxy_scaled(rect, scale: float, disp_w: int, disp_h: int, orig_W: int, orig_H: int):
+    """Convert ROI coordinates from the scaled display image back to original image coordinates."""
+    x1d, y1d, x2d, y2d = rect_to_xyxy(rect, fallback_w=disp_w, fallback_h=disp_h)
+    inv_scale = 1.0 / max(scale, 1e-9)
+    x1 = int(round(x1d * inv_scale));  y1 = int(round(y1d * inv_scale))
+    x2 = int(round(x2d * inv_scale));  y2 = int(round(y2d * inv_scale))
+    # Clamp coordinates within image bounds
+    x1 = clamp(x1, 0, orig_W - 1);  y1 = clamp(y1, 0, orig_H - 1)
+    x2 = clamp(x2, 1, orig_W);      y2 = clamp(y2, 1, orig_H)
+    if x2 <= x1: x2 = min(orig_W, x1 + 1)
+    if y2 <= y1: y2 = min(orig_H, y1 + 1)
+    return x1, y1, x2, y2
 
-
-def scale_rect(rect, sx, sy, W, H):
-    x1, y1, x2, y2 = rect
-    x1 = int(np.clip(x1 * sx, 0, W-1))
-    y1 = int(np.clip(y1 * sy, 0, H-1))
-    x2 = int(np.clip(x2 * sx, 1, W))
-    y2 = int(np.clip(y2 * sy, 1, H))
-    if x2 <= x1: x2 = min(W, x1+1)
-    if y2 <= y1: y2 = min(H, y1+1)
-    return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
-
-def make_mask(h, w, roi):
-    m = np.zeros((h, w), dtype=np.uint8)
-    m[roi["y1"]:roi["y2"], roi["x1"]:roi["x2"]] = 255
-    return m
-
-# ===================== Effects =====================
-def fx_hsv(img_bgr, hue_deg=0, sat_pct=0, val_pct=0):
+# ===================== Image Effect Functions =====================
+def fx_hsv(img_bgr: np.ndarray, hue_deg: int = 0, sat_pct: int = 0, val_pct: int = 0) -> np.ndarray:
+    """Adjust hue, saturation, and value of the image by given percentages."""
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV).astype(np.int16)
-    h, s, v = hsv[...,0], hsv[...,1], hsv[...,2]
-    h = (h + int(hue_deg/2)) % 180
-    s = np.clip(s + (s*sat_pct//100), 0, 255)
-    v = np.clip(v + (v*val_pct//100), 0, 255)
-    out = np.stack([h, s, v], axis=-1).astype(np.uint8)
-    return cv2.cvtColor(out, cv2.COLOR_HSV2BGR)
+    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    # OpenCV hue is [0,179]; convert hue shift from degrees ([-180,180]) to OpenCV scale
+    h = (h + int(hue_deg / 2)) % 180
+    s = np.clip(s + (s * sat_pct // 100), 0, 255)
+    v = np.clip(v + (v * val_pct // 100), 0, 255)
+    hsv_adjusted = np.stack([h, s, v], axis=-1).astype(np.uint8)
+    return cv2.cvtColor(hsv_adjusted, cv2.COLOR_HSV2BGR)
 
-def fx_canny(img_bgr, t1=100, t2=200):
-    g = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    e = cv2.Canny(g, t1, t2)
-    return cv2.cvtColor(e, cv2.COLOR_GRAY2BGR)
+def fx_canny(img_bgr: np.ndarray, t1: int = 100, t2: int = 200) -> np.ndarray:
+    """Apply Canny edge detection to the image."""
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, t1, t2)
+    return cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
 
-def fx_gaussian(img_bgr, k=5, sigma=0):
+def fx_gaussian(img_bgr: np.ndarray, k: int = 5, sigma: int = 0) -> np.ndarray:
+    """Apply Gaussian blur to the image with kernel size k and standard deviation sigma."""
     k = ensure_odd(k)
     return cv2.GaussianBlur(img_bgr, (k, k), sigmaX=sigma, sigmaY=sigma)
 
-def fx_pencil(img_bgr, blur_k=21):
-    g = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    inv = 255 - g
+def fx_pencil(img_bgr: np.ndarray, blur_k: int = 21) -> np.ndarray:
+    """Convert the image to a pencil sketch style image."""
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    inv_gray = 255 - gray
     blur_k = ensure_odd(max(3, blur_k))
-    b = cv2.GaussianBlur(inv, (blur_k, blur_k), 0)
-    d = cv2.divide(g, 255 - b, scale=256)
-    return cv2.cvtColor(d, cv2.COLOR_GRAY2BGR)
+    blur = cv2.GaussianBlur(inv_gray, (blur_k, blur_k), 0)
+    pencil_sketch = cv2.divide(gray, 255 - blur, scale=256)
+    return cv2.cvtColor(pencil_sketch, cv2.COLOR_GRAY2BGR)
 
-def fx_adaptive(img_bgr, block=11, C=2):
+def fx_adaptive(img_bgr: np.ndarray, block: int = 11, C: int = 2) -> np.ndarray:
+    """Apply adaptive thresholding to the image (resulting in a black-and-white effect)."""
     block = ensure_odd(max(3, block))
-    g = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    th = cv2.adaptiveThreshold(
-        g, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, block, C
-    )
-    return cv2.cvtColor(th, cv2.COLOR_GRAY2BGR)
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                   cv2.THRESH_BINARY, block, C)
+    return cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
 
-# ===================== App =====================
-st.set_page_config(page_title="Image Lab + ROI", layout="wide")
-st.title("🧩 ROI ➜ Image Processing (Original vs Processed)")
+def create_histogram_plot(img_bgr: np.ndarray, title: str = "Color Histogram"):
+    """Create a histogram plot for the BGR image."""
+    fig, ax = plt.subplots(figsize=(8, 4))
+    
+    # Calculate histograms for each color channel
+    colors = ['blue', 'green', 'red']
+    bgr_labels = ['Blue', 'Green', 'Red']
+    
+    for i, (color, label) in enumerate(zip(colors, bgr_labels)):
+        hist = cv2.calcHist([img_bgr], [i], None, [256], [0, 256])
+        ax.plot(hist, color=color, label=label, alpha=0.7)
+    
+    ax.set_xlabel('Pixel Intensity')
+    ax.set_ylabel('Frequency')
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Set style
+    plt.style.use('default')
+    ax.set_facecolor('#f8f9fa')
+    
+    return fig
 
-# ---- Sidebar: Main Menu ----
-with st.sidebar:
-    main_sel = option_menu("Main Menu", ["Home", "Settings"],
-                           icons=["house", "gear"], menu_icon="display", default_index=0)
+def create_processed_histogram(img_proc: np.ndarray, tool_name: str):
+    """Create a histogram for the processed image only."""
+    fig, ax = plt.subplots(figsize=(10, 5))
+    
+    # Colors for BGR channels
+    colors = ['blue', 'green', 'red']
+    bgr_labels = ['Blue', 'Green', 'Red']
+    
+    # Processed image histogram only
+    for i, (color, label) in enumerate(zip(colors, bgr_labels)):
+        hist = cv2.calcHist([img_proc], [i], None, [256], [0, 256])
+        ax.plot(hist, color=color, label=f'{label}', alpha=0.8, linewidth=2)
+    
+    ax.set_xlabel('Pixel Intensity')
+    ax.set_ylabel('Frequency')
+    ax.set_title(f'{tool_name} - Color Distribution')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_facecolor('#f8f9fa')
+    
+    plt.tight_layout()
+    return fig
 
-# keep image in state
+# ===================== Streamlit App Interface =====================
+st.set_page_config(page_title="Image Lab (ROI as Tool)", page_icon="📷", layout="wide")
+st.title("📷 Image Lab — ROI as an Independent Tool")
+
+# Initialize session state variables
 if "img_pil" not in st.session_state:
     st.session_state.img_pil = None
+if "roi_coords" not in st.session_state:
+    st.session_state.roi_coords = None
 
-# ---- Sidebar: load image (Home) ----
-if main_sel == "Home":
-    with st.sidebar:
-        st.markdown("---")
-        st.subheader("Source")
-        src = st.radio("เลือกแหล่งรูป", ["อัปโหลด", "กล้อง", "URL", "ตัวอย่าง"], index=0)
-
-        img_pil = None
-        if src == "อัปโหลด":
-            up = st.file_uploader("JPG/PNG", type=["jpg","jpeg","png"])
-            if up: img_pil = load_image_from_bytes(up.read())
-        elif src == "กล้อง":
-            cam = st.camera_input("ถ่ายรูป")
-            if cam: img_pil = load_image_from_bytes(cam.getvalue())
-        elif src == "URL":
-            url = st.text_input("วาง URL ของรูป")
-            if st.button("ดึงรูป") and url:
-                with urllib.request.urlopen(url) as r:
-                    img_pil = load_image_from_bytes(r.read())
-        else:
-            # fallback demo
-            demo = np.full((420,740,3), 220, np.uint8)
-            cv2.putText(demo,"DEMO",(260,230),cv2.FONT_HERSHEY_SIMPLEX,2,(70,70,70),5)
-            img_pil = Image.fromarray(demo)
-
-        if img_pil is not None:
-            st.session_state.img_pil = img_pil
-
-if st.session_state.img_pil is None:
-    st.info("⬅️ เลือก/โหลดรูปจาก Sidebar ก่อน")
-    st.stop()
-
-img_pil = st.session_state.img_pil
-img_bgr = pil_to_cv(img_pil)
-H, W = img_bgr.shape[:2]
-
-# ---- Sidebar: Processing Tools (อยู่ใน navbar ด้านข้าง) ----
+# Sidebar navigation menu (collapsible)
 with st.sidebar:
-    st.markdown("---")
-    tool_sel = option_menu(
-        "Processing Tools",
-        ["HSV / Lab", "Canny", "Gaussian Blur", "Pencil Sketch", "Adaptive Threshold"],
-        icons=["brightness-high","bounding-box","filter","pencil","ui-checks-grid"],
-        menu_icon="magic", default_index=0,
-        styles={
-            "container":{"padding":"0.5rem","background-color":"#f7f9fc"},
-            "icon":{"color":"orange","font-size":"18px"},
-            "nav-link":{"font-size":"16px","margin":"2px","--hover-color":"#eee"},
-            "nav-link-selected":{"background-color":"green","color":"white"},
-        }
+    main_page = option_menu(
+        "เมนูหลัก",               # Main Menu title in Thai
+        ["หน้าแรก", "ตั้งค่า"],    # Options: "Home", "Settings" in Thai
+        icons=["house", "gear"],
+        menu_icon="menu-up",      # icon for the menu title
+        default_index=0,
     )
 
-# ===================== STEP 1: ROI =====================
-st.subheader("Step 1: Select ROI (ลากกรอบเหนือรูป – แล้วค่อยปรับพารามิเตอร์)")
-# แสดงภาพย่อเพื่อเลือก ROI ด้วย st_img_label
-# เลือกให้ย่อกว้างไม่เกิน 900px เพื่อใช้งานสะดวก
-disp_max_w = 900
-scale = min(1.0, disp_max_w / float(W))
-disp_w, disp_h = int(W * scale), int(H * scale)
-disp_img = cv2.resize(img_bgr, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
-disp_pil = cv_to_pil(disp_img)
-
-# ให้ผู้ใช้ลากกรอบได้ 1–หลายกรอบ (จะใช้กรอบแรกเป็น ROI หลัก)
-rects = st_img_label(disp_pil, box_color="red", rects=[])
-
-# คำนวน ROI (ถ้าไม่มีกรอบ -> ใช้ทั้งรูป)
-if rects and len(rects) > 0:
-    x1r, y1r, x2r, y2r = bbox_to_xyxy(rects[0])
-    roi = scale_rect((x1r, y1r, x2r, y2r), sx=1/scale, sy=1/scale, W=W, H=H)
-else:
-    roi = {"x1": 0, "y1": 0, "x2": W, "y2": H}
-
-# โหมดการใช้ ROI
-st.caption(f"ROI pixels: x1={roi['x1']}, y1={roi['y1']}, x2={roi['x2']}, y2={roi['y2']}")
-roi_mode = st.radio(
-    "โหมดการใช้ ROI",
-    ("Process inside ROI", "Process outside ROI (invert mask)", "Crop to ROI"),
-    index=0, horizontal=True
-)
-
-# ===================== STEP 2: Processing =====================
-c1, c2 = st.columns(2, gap="large")
-
-# LEFT: Original
-with c1:
-    st.markdown("#### 🖼️ Original Image")
-    st.image(cv_to_pil(img_bgr), use_container_width=True)
-    st.caption(f"Shape: {img_bgr.shape}")
-
-# RIGHT: Processed (พารามิเตอร์อยู่ใต้รูป)
-with c2:
-    st.markdown(f"#### ✨ Processed Image ({tool_sel})")
-    processed_img_box = st.container()
-    processed_placeholder = processed_img_box.empty()
-
-    params = st.container()
-    with params:
+# Home page content (Image Lab functionality)
+if main_page == "หน้าแรก":
+    # Sidebar controls (collapsible left navbar)
+    with st.sidebar:
         st.markdown("---")
-        st.write("**Parameters**")
-        activated = st.slider("Activated", 0, 100, 30, help="ความแรงเอฟเฟกต์ (%)")
+        
+        # Control Panel
+        st.markdown("### 🎛️ Control Panel")
+        
+        # Image source selection
+        st.markdown("#### 📁 Image Source")
+        source_mode = st.radio("เลือกแหล่งรูป", ["Upload Image", "Camera", "Image URL"], index=0)
+        
+        img_pil = None
+        if source_mode == "Upload Image":
+            uploaded_file = st.file_uploader("อัปโหลด JPG/PNG", type=["jpg", "jpeg", "png"])
+            if uploaded_file:
+                img_pil = load_image_from_bytes(uploaded_file.read())
+        elif source_mode == "Camera":
+            camera_image = st.camera_input("ถ่ายรูปจากกล้อง")
+            if camera_image:
+                img_pil = load_image_from_bytes(camera_image.getvalue())
+        elif source_mode == "Image URL":
+            url = st.text_input("วาง URL ของรูป")
+            if st.button("ดึงรูป") and url:
+                try:
+                    with urllib.request.urlopen(url) as response:
+                        img_pil = load_image_from_bytes(response.read())
+                except Exception as e:
+                    st.error(f"ไม่สามารถโหลดรูปจาก URL ได้: {e}")
+        
+        if img_pil is not None:
+            st.session_state.img_pil = img_pil
+            st.session_state.roi_coords = None
+            # Show thumbnail of uploaded image
+            st.image(img_pil, caption="Uploaded Image", width=200)
 
-        # เตรียมภาพตาม ROI mode
-        if roi_mode == "Crop to ROI":
-            target = img_bgr[roi["y1"]:roi["y2"], roi["x1"]:roi["x2"]].copy()
-        else:
-            target = img_bgr.copy()
-
-        # เลือกเอฟเฟกต์ + พารามิเตอร์
-        if tool_sel == "HSV / Lab":
-            hue = st.slider("Hue (°)", -180, 180, 0)
-            sat = st.slider("Saturation (%)", -100, 100, 0)
-            val = st.slider("Value (%)", -100, 100, 0)
-            fx = fx_hsv(target, hue_deg=hue, sat_pct=sat, val_pct=val)
-
-        elif tool_sel == "Canny":
-            t1 = st.slider("Threshold 1", 0, 500, 100)
-            t2 = st.slider("Threshold 2", 0, 500, 200)
-            fx = fx_canny(target, t1=t1, t2=t2)
-
-        elif tool_sel == "Gaussian Blur":
-            k = st.slider("Kernel size (odd)", 1, 99, 5, step=2)
+        st.markdown("---")
+        
+        # Processing Studio
+        st.markdown("#### 🎨 Processing Studio")
+        st.markdown("Select transformation:")
+        
+        tool = st.selectbox(
+            "เลือกเครื่องมือ", 
+            ["Edge Detection (Canny)", "HSV / Lab", "Gaussian Blur", "Pencil Sketch", "Adaptive Threshold"],
+            index=0
+        )
+        
+        # Settings based on selected tool
+        st.markdown("##### ⚙️ Settings")
+        
+        # Edge Detection Settings
+        if tool == "Edge Detection (Canny)":
+            st.markdown("**Lower Threshold**")
+            lower_threshold = st.slider("Lower", 0, 255, 50, label_visibility="collapsed")
+            st.markdown("**Upper Threshold**")  
+            upper_threshold = st.slider("Upper", 0, 255, 150, label_visibility="collapsed")
+        elif tool == "HSV / Lab":
+            hue = st.slider("ปรับฮิว (องศา)", -180, 180, 0)
+            sat = st.slider("ปรับความอิ่มตัวของสี (%)", -100, 100, 0)
+            val = st.slider("ปรับความสว่าง (%)", -100, 100, 0)
+        elif tool == "Gaussian Blur":
+            k = st.slider("Kernel size", 1, 99, 5, step=2)
             sigma = st.slider("Sigma", 0, 50, 0)
-            fx = fx_gaussian(target, k=k, sigma=sigma)
-
-        elif tool_sel == "Pencil Sketch":
-            blur_k = st.slider("Blur (odd)", 3, 99, 21, step=2)
-            fx = fx_pencil(target, blur_k=blur_k)
-
+        elif tool == "Pencil Sketch":
+            blur_k = st.slider("ระดับความเบลอ", 3, 99, 21, step=2)
         else:  # Adaptive Threshold
-            block = st.slider("Block size (odd)", 3, 99, 11, step=2)
-            C = st.slider("C (bias)", -20, 20, 2)
-            fx = fx_adaptive(target, block=block, C=C)
+            block = st.slider("ขนาดบล็อก", 3, 99, 11, step=2)
+            C = st.slider("ค่า C", -20, 20, 2)
+        
+        # Effect strength
+        strength = st.slider("ความเข้มข้นของเอฟเฟกต์ (%)", 0, 100, 30)
 
-        # รวมผลลัพธ์ตามโหมด ROI
-        if roi_mode == "Crop to ROI":
-            processed = blend_with_original(target, fx, activated)
-        else:
-            # ทำทั้งรูป แล้วผสานด้วยหน้ากาก ROI หรือกลับหน้ากาก
-            full_fx = fx_hsv(img_bgr) if False else None  # placeholder
-            # แต่เราใช้ fx ที่คำนวณจาก "target=img_bgr.copy()" อยู่แล้วข้างบน
-            fx_full = fx  # ผลของเอฟเฟกต์ทั้งภาพ
-            mask = make_mask(H, W, roi)
-            if roi_mode == "Process outside ROI (invert mask)":
-                mask = cv2.bitwise_not(mask)
+    # Main content area
+    # Ensure an image is loaded
+    if st.session_state.img_pil is None:
+        st.info("⬅️ กรุณาเลือกหรืออัปโหลดรูปจากแถบด้านข้างก่อน")
+    else:
+        # Prepare image data
+        img_pil = st.session_state.img_pil
+        img_bgr = pil_to_cv(img_pil)
+        H, W = img_bgr.shape[:2]
 
-            a = float(activated) / 100.0
-            fx_mix = cv2.addWeighted(fx_full, a, img_bgr, 1.0 - a, 0.0)
-            # composite ด้วย mask
-            bg = cv2.bitwise_and(img_bgr, img_bgr, mask=cv2.bitwise_not(mask))
-            fg = cv2.bitwise_and(fx_mix, fx_mix, mask=mask)
-            processed = cv2.add(bg, fg)
+        # Apply selected effect
+        if tool == "Edge Detection (Canny)":
+            st.subheader("✂️ Edge Detection Processing")
+            processed_bgr = fx_canny(img_bgr, t1=lower_threshold, t2=upper_threshold)
+        elif tool == "HSV / Lab":
+            st.subheader("🌈 HSV Color Adjustment")
+            processed_bgr = fx_hsv(img_bgr, hue_deg=hue, sat_pct=sat, val_pct=val)
+            processed_bgr = blend_with_original(img_bgr, processed_bgr, strength)
+        elif tool == "Gaussian Blur":
+            st.subheader("🌫️ Gaussian Blur")
+            processed_bgr = fx_gaussian(img_bgr, k=k, sigma=sigma)
+            processed_bgr = blend_with_original(img_bgr, processed_bgr, strength)
+        elif tool == "Pencil Sketch":
+            st.subheader("✏️ Pencil Sketch")
+            processed_bgr = fx_pencil(img_bgr, blur_k=blur_k)
+            processed_bgr = blend_with_original(img_bgr, processed_bgr, strength)
+        else:  # Adaptive Threshold
+            st.subheader("📋 Adaptive Threshold")
+            processed_bgr = fx_adaptive(img_bgr, block=block, C=C)
+        
+        # Display comparison
+        col1, col2 = st.columns(2, gap="large")
+        
+        with col1:
+            st.markdown("#### 🖼️ Original Image")
+            st.image(img_pil, use_container_width=True)
+            st.caption(f"Shape: {img_bgr.shape}")
+            
+        with col2:
+            st.markdown(f"#### ✨ Processed Image ({tool})")
+            st.image(cv_to_pil(processed_bgr), use_container_width=True)
+            st.caption(f"Shape: {processed_bgr.shape}")
+        
+        # Display comparison histogram in the center below the images
+        st.markdown("---")
+        st.markdown("### 📊 Processed Image Analysis")
+        
+        # Single processed image histogram
+        fig_processed = create_processed_histogram(processed_bgr, tool)
+        st.pyplot(fig_processed)
+        plt.close(fig_processed)
+        
+        # Download button for processed image
+        st.download_button(
+            "📥 ดาวน์โหลดภาพผลลัพธ์",
+            data=cv2.imencode(".png", processed_bgr)[1].tobytes(),
+            file_name=f"{tool.lower().replace(' ', '_')}_processed.png",
+            mime="image/png",
+            use_container_width=True
+        )
 
-    processed_placeholder.image(cv_to_pil(processed), use_container_width=True)
-    st.caption(f"Shape: {processed.shape}")
-
-# Download
-st.download_button(
-    "Download Processed",
-    data=cv2.imencode(".png", processed)[1].tobytes(),
-    file_name="processed.png",
-    mime="image/png",
-)
-
-# Settings page (optional)
-if main_sel == "Settings":
+# Settings page content
+elif main_page == "ตั้งค่า":
     st.markdown("---")
-    st.subheader("Settings")
-    st.write("ใส่ค่าคงที่/ธีมที่ต้องการในอนาคตได้ที่นี่")
+    st.subheader("⚙️ การตั้งค่า")
+    st.write("คุณสามารถปรับธีมหรือการตั้งค่าอื่นๆ ของแอปพลิเคชันได้ที่นี่")
