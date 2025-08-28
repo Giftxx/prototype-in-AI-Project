@@ -188,7 +188,7 @@ def create_processed_histogram(img_proc: np.ndarray, tool_name: str):
 
 # ===================== Streamlit App Interface =====================
 st.set_page_config(page_title="Image Lab (ROI as Tool)", page_icon="📷", layout="wide")
-st.title("📷 Image Lab — ROI as an Independent Tool")
+st.title("📷 Explore the rapid prototype in AI Project")
 
 # Initialize session state variables
 if "img_pil" not in st.session_state:
