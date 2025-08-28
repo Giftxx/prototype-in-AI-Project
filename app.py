@@ -200,8 +200,8 @@ if "roi_coords" not in st.session_state:
 with st.sidebar:
     main_page = option_menu(
         "เมนูหลัก",               # Main Menu title in Thai
-        ["หน้าแรก", "ตั้งค่า"],    # Options: "Home", "Settings" in Thai
-        icons=["house", "gear"],
+        ["หน้าแรก"],              # Options: "Home" in Thai
+        icons=["house"],
         menu_icon="menu-up",      # icon for the menu title
         default_index=0,
     )
@@ -276,9 +276,6 @@ if main_page == "หน้าแรก":
         else:  # Adaptive Threshold
             block = st.slider("ขนาดบล็อก", 3, 99, 11, step=2)
             C = st.slider("ค่า C", -20, 20, 2)
-        
-        # Effect strength
-        strength = st.slider("ความเข้มข้นของเอฟเฟกต์ (%)", 0, 100, 30)
 
     # Main content area
     # Ensure an image is loaded
@@ -297,15 +294,12 @@ if main_page == "หน้าแรก":
         elif tool == "HSV / Lab":
             st.subheader("🌈 HSV Color Adjustment")
             processed_bgr = fx_hsv(img_bgr, hue_deg=hue, sat_pct=sat, val_pct=val)
-            processed_bgr = blend_with_original(img_bgr, processed_bgr, strength)
         elif tool == "Gaussian Blur":
             st.subheader("🌫️ Gaussian Blur")
             processed_bgr = fx_gaussian(img_bgr, k=k, sigma=sigma)
-            processed_bgr = blend_with_original(img_bgr, processed_bgr, strength)
         elif tool == "Pencil Sketch":
             st.subheader("✏️ Pencil Sketch")
             processed_bgr = fx_pencil(img_bgr, blur_k=blur_k)
-            processed_bgr = blend_with_original(img_bgr, processed_bgr, strength)
         else:  # Adaptive Threshold
             st.subheader("📋 Adaptive Threshold")
             processed_bgr = fx_adaptive(img_bgr, block=block, C=C)
@@ -340,9 +334,3 @@ if main_page == "หน้าแรก":
             mime="image/png",
             use_container_width=True
         )
-
-# Settings page content
-elif main_page == "ตั้งค่า":
-    st.markdown("---")
-    st.subheader("⚙️ การตั้งค่า")
-    st.write("คุณสามารถปรับธีมหรือการตั้งค่าอื่นๆ ของแอปพลิเคชันได้ที่นี่")
