@@ -156,7 +156,7 @@ pip install streamlit opencv-python pillow numpy matplotlib streamlit-option-men
 
 ### การรันโปรแกรม
 ```bash
-streamlit run app7.py
+streamlit run app.py
 ```
 
 ## 📝 หมายเหตุ
